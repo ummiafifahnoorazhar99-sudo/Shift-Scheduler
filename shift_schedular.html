@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Team Shift Scheduler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8f9fa;
+        }
+        .header-bg {
+            background-color: #3b82f6; /* Blue 500 */
+        }
+        .shift-cell {
+            min-height: 4rem; /* Ensure cells are tall enough for tapping */
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .shift-cell.occupied {
+            background-color: #e0f2fe; /* Light Blue 100 */
+            border-left: 4px solid #3b82f6;
+        }
+        .shift-cell:hover {
+            background-color: #f1f5f9; /* Slate 100 */
+        }
+        .occupied:hover {
+            background-color: #bae6fd; /* Light Blue 200 on hover */
+        }
+        .scroll-container {
+            /* Enable horizontal scrolling on small screens for the table */
+            overflow-x: auto;
+        }
+        /* Custom scrollbar for aesthetics */
+        .scroll-container::-webkit-scrollbar {
+            height: 8px;
+        }
+        .scroll-container::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <!-- Header Section -->
+    <header class="header-bg p-4 shadow-lg text-white">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+            <h1 class="text-2xl font-bold">ZUS Coffee Shift Planner</h1>
+            <div id="auth-status" class="text-sm bg-blue-700 py-1 px-3 rounded-full">
+                Loading User...
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-grow p-4 md:p-8">
+        <div class="max-w-7xl mx-auto">
+            
+            <section class="mb-8 p-4 bg-white rounded-xl shadow-lg">
+                <h2 class="text-xl font-semibold mb-3 text-gray-800">My Shift Configuration</h2>
+                <div class="flex flex-col sm:flex-row gap-4">
+                    <div class="flex-1">
+                        <label for="shift-name" class="block text-sm font-medium text-gray-700">My Name / ID</label>
+                        <input type="text" id="shift-name" placeholder="E.g., Adam (A101)" class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+                    </div>
+                    <div class="flex-1">
+                        <label for="shift-time" class="block text-sm font-medium text-gray-700">My Shift Time</label>
+                        <input type="text" id="shift-time" placeholder="E.g., 9:00 AM - 5:00 PM" class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+                    </div>
+                </div>
+            </section>
+
+            <h2 class="text-2xl font-bold mb-4 text-gray-800">Weekly Schedule</h2>
+
+            <!-- Shift Table Container (Scrollable on small screens) -->
+            <div class="scroll-container bg-white rounded-xl shadow-lg">
+                <table id="shift-table" class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/12">Shift</th>
+                            <!-- Days of the week are populated by JS -->
+                        </tr>
+                    </thead>
+                    <tbody id="table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Rows are populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <p id="error-message" class="mt-4 text-red-500 font-medium hidden"></p>
+        </div>
+    </main>
+
+    <!-- Modal for displaying shift details -->
+    <div id="shift-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center p-4 z-50" onclick="closeModal()">
+        <div class="bg-white rounded-xl p-6 w-full max-w-sm shadow-2xl" onclick="event.stopPropagation()">
+            <h3 id="modal-title" class="text-xl font-bold text-gray-900 mb-4">Shift Details</h3>
+            <p id="modal-details" class="text-gray-700 mb-6 whitespace-pre-wrap"></p>
+            <button onclick="closeModal()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-150">Close</button>
+        </div>
+    </div>
+
+
+    <!-- Firebase Configuration and Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, runTransaction, getDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: Global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Firestore setup
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+        const SHIFTS = ['Morning', 'Midday', 'Evening']; // Example shifts
+
+        const tableBody = document.getElementById('table-body');
+        const shiftNameInput = document.getElementById('shift-name');
+        const shiftTimeInput = document.getElementById('shift-time');
+        const authStatus = document.getElementById('auth-status');
+        const errorMessage = document.getElementById('error-message');
+        const shiftModal = document.getElementById('shift-modal');
+        const modalTitle = document.getElementById('modal-title');
+        const modalDetails = document.getElementById('modal-details');
+
+        setLogLevel('Debug'); // Enable debug logging for Firebase
+
+        // Utility function for exponential backoff retry logic
+        const fetchWithRetry = async (apiCall, maxRetries = 5) => {
+            let attempt = 0;
+            while (attempt < maxRetries) {
+                try {
+                    return await apiCall();
+                } catch (error) {
+                    attempt++;
+                    if (attempt >= maxRetries) {
+                        console.error("API call failed after max retries:", error);
+                        throw error;
+                    }
+                    const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                    console.warn(`Attempt ${attempt} failed. Retrying in ${delay.toFixed(0)}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        };
+
+
+        // --- UI Rendering ---
+
+        function renderTable(shiftsData) {
+            // Re-render the table header (only days)
+            const tableHead = document.querySelector('#shift-table thead tr');
+            if (tableHead.children.length === 1) {
+                DAYS.forEach(day => {
+                    const th = document.createElement('th');
+                    th.className = 'px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/7';
+                    th.textContent = day.substring(0, 3); // Use abbreviation for mobile
+                    tableHead.appendChild(th);
+                });
+            }
+
+            // Clear existing rows
+            tableBody.innerHTML = ''; 
+
+            SHIFTS.forEach(shiftName => {
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-gray-50 transition duration-150';
+
+                // Shift Name Cell (e.g., Morning)
+                const shiftCell = document.createElement('td');
+                shiftCell.className = 'px-3 py-3 whitespace-nowrap text-sm font-medium text-gray-900 border-r bg-gray-50/50';
+                shiftCell.textContent = shiftName;
+                row.appendChild(shiftCell);
+
+                DAYS.forEach(day => {
+                    const cellId = `${day}-${shiftName}`;
+                    const cellData = shiftsData[cellId] || {};
+                    const isOccupied = Object.keys(cellData).length > 0;
+                    
+                    const td = document.createElement('td');
+                    td.id = cellId;
+                    td.className = `shift-cell px-3 py-3 text-xs text-gray-700 align-top ${isOccupied ? 'occupied' : 'bg-white'}`;
+                    
+                    // Display registered users
+                    td.innerHTML = Object.entries(cellData).map(([id, info]) => {
+                        const isCurrentUser = id === userId;
+                        const userDisplay = info.name || `User (${id.substring(0, 4)}...)`;
+                        const shiftDisplay = info.time || '';
+                        
+                        return `
+                            <div class="mb-1 p-1 rounded-md text-white ${isCurrentUser ? 'bg-blue-500 shadow' : 'bg-gray-400'} font-medium">
+                                ${userDisplay}
+                                <span class="block text-xs font-normal opacity-90">${shiftDisplay}</span>
+                            </div>
+                        `;
+                    }).join('');
+
+                    td.onclick = (e) => handleCellClick(e, day, shiftName, cellData);
+                    row.appendChild(td);
+                });
+                tableBody.appendChild(row);
+            });
+        }
+
+
+        // --- Firestore Operations ---
+
+        const SHIFT_DOC_ID = 'weeklySchedule';
+        const PUBLIC_COLLECTION_PATH = `artifacts/${appId}/public/data/shifts`;
+
+        const getShiftDocRef = () => doc(db, PUBLIC_COLLECTION_PATH, SHIFT_DOC_ID);
+
+        function showMessage(message, isError = true) {
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+            if (!isError) {
+                errorMessage.classList.add('text-green-500');
+                errorMessage.classList.remove('text-red-500');
+            } else {
+                errorMessage.classList.add('text-red-500');
+                errorMessage.classList.remove('text-green-500');
+            }
+            setTimeout(() => {
+                errorMessage.classList.add('hidden');
+                errorMessage.classList.remove('text-green-500');
+            }, 5000);
+        }
+
+        async function updateShift(day, shiftName) {
+            const docRef = getShiftDocRef();
+            const cellId = `${day}-${shiftName}`;
+            const userName = shiftNameInput.value.trim();
+            const shiftTime = shiftTimeInput.value.trim();
+            
+            if (!userName || !shiftTime) {
+                showModal("Configuration Required", "Please enter your Name/ID and your Shift Time in the section above before marking a shift.");
+                return;
+            }
+
+            try {
+                await fetchWithRetry(async () => {
+                    await runTransaction(db, async (transaction) => {
+                        const sfDoc = await transaction.get(docRef);
+                        const currentData = sfDoc.exists() ? sfDoc.data() : {};
+                        const cellData = currentData[cellId] || {};
+
+                        const userIsRegistered = cellData.hasOwnProperty(userId);
+
+                        if (userIsRegistered) {
+                            // User is already registered, so unregister them (remove their shift)
+                            delete cellData[userId];
+                            showMessage(`Shift removed for ${day}, ${shiftName}.`, false);
+                        } else {
+                            // User is not registered, so register them (add their shift)
+                            cellData[userId] = { 
+                                name: userName, 
+                                time: shiftTime, 
+                                timestamp: Date.now() 
+                            };
+                            showMessage(`Shift set for ${day}, ${shiftName}.`, false);
+                        }
+
+                        // Update the entire document
+                        transaction.set(docRef, { ...currentData, [cellId]: cellData }, { merge: true });
+                    });
+                });
+            } catch (e) {
+                console.error("Transaction failed: ", e);
+                showMessage("Failed to update shift. Please try again or check console for details.");
+            }
+        }
+        
+        // --- Event Handlers and Modal ---
+
+        function handleCellClick(e, day, shiftName, cellData) {
+            // If the user clicks on an existing user's div, show details
+            if (e.target.closest('div') && e.target.closest('.shift-cell') === e.currentTarget) {
+                let details = '';
+                const users = Object.entries(cellData).map(([id, info]) => {
+                    const isCurrentUser = id === userId;
+                    const status = isCurrentUser ? ' (YOU)' : '';
+                    return `• ${info.name || 'Unknown User'} (Shift: ${info.time || 'N/A'}) ${status}`;
+                }).join('\n');
+
+                if (users) {
+                    details = `Users on this shift:\n\n${users}`;
+                } else {
+                    details = 'This shift is currently open.';
+                }
+                
+                showModal(`${day} - ${shiftName} Shift`, details);
+            }
+            
+            // Toggle the shift for the current user
+            updateShift(day, shiftName);
+        }
+
+        function showModal(title, details) {
+            modalTitle.textContent = title;
+            modalDetails.textContent = details;
+            shiftModal.classList.remove('hidden');
+            shiftModal.classList.add('flex');
+        }
+
+        window.closeModal = function() {
+            shiftModal.classList.add('hidden');
+            shiftModal.classList.remove('flex');
+        }
+        
+        // --- Initialization ---
+
+        async function initFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Authenticate user
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // Wait for auth state to stabilize
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        authStatus.textContent = `User ID: ${userId.substring(0, 8)}...`;
+                        isAuthReady = true;
+                        
+                        // Set up real-time listener only after auth is ready
+                        setupRealtimeListener();
+                    } else {
+                        // This case should be rare in the canvas environment, but handles sign-out
+                        userId = null;
+                        authStatus.textContent = 'Signed Out';
+                        isAuthReady = true;
+                        renderTable({}); // Clear table if signed out
+                    }
+                });
+                
+            } catch (error) {
+                console.error("Firebase Initialization Failed:", error);
+                authStatus.textContent = 'Auth Error';
+                showMessage('Failed to connect to the database. Check console for details.', true);
+            }
+        }
+        
+        function setupRealtimeListener() {
+             if (!db || !isAuthReady || !userId) return;
+
+             const docRef = getShiftDocRef();
+
+             // Check if the document exists and create it if not
+             getDoc(docRef).then(docSnapshot => {
+                 if (!docSnapshot.exists()) {
+                     console.log("Creating initial shifts document.");
+                     // Create an empty document so the listener doesn't fail
+                     setDoc(docRef, {});
+                 }
+             }).catch(err => {
+                 console.error("Error checking document existence:", err);
+             });
+
+             // Set up the real-time listener
+             onSnapshot(docRef, (doc) => {
+                 if (doc.exists()) {
+                     const shiftsData = doc.data();
+                     // Data should be an object mapping cellId -> { userId: {name, time, timestamp} }
+                     renderTable(shiftsData);
+                 } else {
+                     // Document doesn't exist yet, render empty table
+                     renderTable({}); 
+                 }
+             }, (error) => {
+                 console.error("Error listening to shifts: ", error);
+                 showMessage("Real-time updates failed. Schedule may be out of date.");
+             });
+        }
+
+
+        // Start the application
+        window.onload = initFirebase;
+        
+    </script>
+</body>
+</html>
