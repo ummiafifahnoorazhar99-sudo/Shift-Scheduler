@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZUS Coffee Staff & Roster Manager</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Optional: Apply a standard font like Inter */
+        html { font-family: 'Inter', sans-serif; scroll-behavior: smooth; }
+        /* Style for sticky table header on Roster view */
+        .roster-table th.sticky-left {
+            position: sticky;
+            left: 0;
+            z-index: 20;
+        }
+        .roster-table td.sticky-left {
+            position: sticky;
+            left: 0;
+            z-index: 10;
+        }
+    </style>
+    <!-- 1. Load React and ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- 2. Load Babel (Must be after React/ReactDOM) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+    <div id="root">
+        <!-- Loading fallback -->
+        <div class="flex flex-col justify-center items-center h-screen bg-gray-100">
+            <svg class="animate-spin h-10 w-10 text-indigo-600 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <div class="text-xl text-indigo-600">Loading Application Resources...</div>
+        </div>
+    </div>
+
+    <!-- 3. Firebase Imports (must be type="module") -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, collection, onSnapshot, setDoc, deleteDoc, query, where, arrayUnion, arrayRemove, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Expose Firebase functions and instances globally for Babel script access
+        window.firebase = {
+            initializeApp,
+            getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+            getFirestore, doc, collection, onSnapshot, setDoc, deleteDoc, query, where, arrayUnion, arrayRemove, writeBatch
+        };
+
+        // Also expose React globals from the window object for extra robustness
+        window.React = window.React;
+        window.ReactDOM = window.ReactDOM;
+    </script>
+
+    <!-- 4. React Application Logic (must be type="text/babel") -->
+    <script type="text/babel">
+        // FIX: Ensure React and its hooks are accessed from the global object
+        const React = window.React;
+        const ReactDOM = window.ReactDOM;
+        const { useState, useEffect, useCallback, useMemo } = React;
+
+        if (!window.firebase) {
+            console.error("Firebase module imports failed to load. Check your network or run environment.");
+            // Render an error message if Firebase is unavailable
+            const ErrorApp = () => (
+                <div className="text-center p-8 bg-white rounded-xl shadow-lg max-w-xl mx-auto mt-8">
+                    <p className="text-xl text-red-500 font-bold">Initialization Error</p>
+                    <p className="text-gray-700 mt-4">The Firebase dependencies could not be loaded. If running locally, please use a "Live Server" extension or deploy to GitHub Pages.</p>
+                </div>
+            );
+            ReactDOM.createRoot(document.getElementById('root')).render(<ErrorApp />);
+            throw new Error("Cannot proceed without Firebase.");
+        }
+        
+        const { 
+            initializeApp, 
+            getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
+            getFirestore, doc, collection, onSnapshot, setDoc, deleteDoc 
+        } = window.firebase;
+
+        // --- Icon Component Replacement (Using inline SVGs) ---
+        const Icon = ({ name, className = "w-5 h-5", color = "currentColor", strokeWidth = 2, children }) => {
+            const icons = {
+                Calendar: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
+                Home: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+                MapPin: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><path d="M12 11.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"/><path d="M12 21.5s-7-5.5-7-10.5a7 7 0 1 1 14 0c0 5-7 10.5-7 10.5z"/></svg>,
+                Users: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+                PlusCircle: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>,
+                Trash2: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>,
+                Clock: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+                Loader2: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>,
+                Archive: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="10" width="18" height="12" rx="2" ry="2"/><path d="M1 6h22"/><path d="M10 12v6"/><path d="M14 12v6"/></svg>,
+                CalendarDays: <svg xmlns="http://www.w3.org/2000/svg" className={className} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M13.5 14h.01"/><path d="M13.5 18h.01"/><path d="M10.5 14h.01"/><path d="M10.5 18h.01"/><path d="M7.5 14h.01"/><path d="M7.5 18h.01"/></svg>,
+            };
+            const TargetIcon = icons[name];
+            return TargetIcon ? TargetIcon : <span className={className}>?</span>;
+        };
+
+        // --- Global Firebase Configuration (Mandatory) ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Helper to handle exponential backoff for retries
+        const withExponentialBackoff = async (fn, maxRetries = 5, delay = 1000) => {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    return await fn();
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, delay * 2 ** i));
+                }
+            }
+        };
+
+        // --- Firebase Paths ---
+        const OutletPath = (userId) => `/artifacts/${appId}/users/${userId}/outlets`;
+        const EmployeePath = (userId) => `/artifacts/${appId}/users/${userId}/employees`;
+
+        // Roster data structure placeholder (for demonstration)
+        const mockRosterData = [
+            { day: 'Sunday', shift: 'Morning (8am - 4pm)', staff: ['Alex', 'Ben'] },
+            { day: 'Sunday', shift: 'Evening (4pm - 12am)', staff: ['Chloe', 'Dan'] },
+            { day: 'Monday', shift: 'Morning (8am - 4pm)', staff: ['Alice', 'Bob'] },
+            { day: 'Monday', shift: 'Evening (4pm - 12am)', staff: ['Charlie', 'David'] },
+            { day: 'Tuesday', shift: 'Morning (8am - 4pm)', staff: ['Eve', 'Frank'] },
+            { day: 'Tuesday', shift: 'Evening (4pm - 12am)', staff: ['Grace', 'Heidi'] },
+            { day: 'Wednesday', shift: 'Morning (8am - 4pm)', staff: ['Ivy', 'Jake'] },
+            { day: 'Wednesday', shift: 'Evening (4pm - 12am)', staff: ['Kelly', 'Leo'] },
+            { day: 'Thursday', shift: 'Morning (8am - 4pm)', staff: ['Mia', 'Nick'] },
+            { day: 'Thursday', shift: 'Evening (4pm - 12am)', staff: ['Olivia', 'Pat'] },
+            { day: 'Friday', shift: 'Morning (8am - 4pm)', staff: ['Quinn', 'Ryan'] },
+            { day: 'Friday', shift: 'Evening (4pm - 12am)', staff: ['Sam', 'Tom'] },
+            { day: 'Saturday', shift: 'Morning (8am - 4pm)', staff: ['Uma', 'Vic'] },
+            { day: 'Saturday', shift: 'Evening (4pm - 12am)', staff: ['Will', 'Xena'] },
+        ];
+
+
+        // --- NavBar Component (Sticky Header) ---
+
+        const NavBar = ({ isAuthReady, currentPage, goToDashboard }) => (
+            <nav className="bg-indigo-700 shadow-xl text-white p-4 sticky top-0 z-50">
+                <div className="max-w-7xl mx-auto flex justify-between items-center">
+                    {/* Logo and Title */}
+                    <div className="flex items-center space-x-3">
+                        <Icon name="Calendar" className="w-7 h-7" />
+                        <h1 className="text-2xl font-bold tracking-wider">
+                            ZUS Coffee Staff & Roster Manager
+                        </h1>
+                    </div>
+
+                    {/* Navigation and Status */}
+                    <div className="flex items-center space-x-4">
+                        {/* Show Back to Dashboard button only when not on the dashboard */}
+                        {currentPage !== 'dashboard' && (
+                            <button
+                                onClick={goToDashboard}
+                                className="flex items-center px-3 py-2 bg-indigo-500 hover:bg-indigo-400 rounded-lg transition duration-150 font-medium shadow-md"
+                            >
+                                <Icon name="Home" className="w-4 h-4 mr-2" />
+                                Dashboard
+                            </button>
+                        )}
+                        {/* Authentication Status Indicator */}
+                        {!isAuthReady ? (
+                            <div className="flex items-center text-indigo-200 text-sm">
+                                <Icon name="Loader2" className="w-5 h-5 animate-spin mr-2" />
+                                Initializing...
+                            </div>
+                        ) : (
+                             <div className="hidden sm:block text-indigo-200 text-sm">
+                                Ready
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </nav>
+        );
+
+
+        // --- Roster Management Component ---
+
+        const RosterManagement = ({ outlet, employees, goBack, db, auth }) => {
+            const [roster, setRoster] = useState([]);
+            const [isLoading, setIsLoading] = useState(true);
+            const [isSaving, setIsSaving] = useState(false);
+            const [weekStart, setWeekStart] = useState(new Date());
+
+            // Calculate the start of the current week (Sunday)
+            const calculateWeekStart = (date) => {
+                const d = new Date(date);
+                const day = d.getDay(); // 0 is Sunday, 6 is Saturday
+                const diff = d.getDate() - day;
+                d.setDate(diff);
+                d.setHours(0, 0, 0, 0);
+                return d;
+            };
+
+            useEffect(() => {
+                setWeekStart(calculateWeekStart(new Date()));
+            }, []);
+
+            // Placeholder function to fetch/listen to a mock roster for the selected week
+            const fetchRoster = useCallback(async () => {
+                if (!db || !auth || !auth.currentUser) return;
+                setIsLoading(true);
+
+                // Simulate fetching data for the specific week
+                setTimeout(() => {
+                    setRoster(mockRosterData);
+                    setIsLoading(false);
+                }, 800);
+
+            }, [db, auth, outlet.id, weekStart]); // Include all external dependencies
+
+            useEffect(() => {
+                fetchRoster();
+            }, [fetchRoster]);
+
+            const handleSaveRoster = async () => {
+                if (!db || !auth || !auth.currentUser) return;
+                setIsSaving(true);
+                // Placeholder for saving logic
+                await new Promise(resolve => setTimeout(resolve, 500));
+                setIsSaving(false);
+                console.log(`Roster saved for outlet: ${outlet.name} for week starting ${weekStart.toISOString().slice(0, 10)}`);
+                // In a real app, you would use setDoc to save the roster data here
+            };
+
+            const getDayName = (date) => {
+                return date.toLocaleDateString('en-US', { weekday: 'long' });
+            };
+
+            const getWeekDays = (start) => {
+                const days = [];
+                for (let i = 0; i < 7; i++) {
+                    const day = new Date(start);
+                    day.setDate(start.getDate() + i);
+                    days.push(day);
+                }
+                return days;
+            };
+
+            const weekDays = getWeekDays(weekStart);
+
+            const handlePreviousWeek = () => {
+                const newDate = new Date(weekStart);
+                newDate.setDate(weekStart.getDate() - 7);
+                setWeekStart(calculateWeekStart(newDate)); // Recalculate start in case of timezone issues
+            };
+
+            const handleNextWeek = () => {
+                const newDate = new Date(weekStart);
+                newDate.setDate(weekStart.getDate() + 7);
+                setWeekStart(calculateWeekStart(newDate)); // Recalculate start
+            };
+            
+            // Helper function to find staff for a specific day and shift
+            const getStaffForShift = (dayName, shift) => {
+                const dayRoster = roster.find(r => r.day === dayName && r.shift === shift);
+                return dayRoster ? dayRoster.staff.join(', ') : 'Unassigned';
+            };
+
+            // Define the shifts we care about
+            const shifts = ['Morning (8am - 4pm)', 'Evening (4pm - 12am)'];
+
+            // Format date range for display
+            const startDateFormatted = weekDays[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            const endDateFormatted = weekDays[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+            return (
+                <div className="p-6 bg-white rounded-xl shadow-2xl space-y-6 max-w-7xl mx-auto mt-8">
+                    <div className="flex items-center justify-between border-b pb-4 mb-4">
+                        <h2 className="text-3xl font-extrabold text-indigo-700 flex items-center">
+                            <Icon name="Calendar" className="w-8 h-8 mr-3 text-indigo-500" />
+                            Roster for {outlet.name}
+                        </h2>
+                        <button
+                            onClick={goBack}
+                            className="flex items-center px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg shadow hover:bg-gray-200 transition duration-150"
+                        >
+                            <Icon name="Home" className="w-5 h-5 mr-2" />
+                            Dashboard
+                        </button>
+                    </div>
+
+                    <div className="flex justify-between items-center bg-indigo-50 p-3 rounded-lg shadow-inner">
+                        <button onClick={handlePreviousWeek} className="p-2 bg-indigo-100 rounded-full hover:bg-indigo-200 transition font-semibold">
+                            &larr; Previous Week
+                        </button>
+                        <div className="text-xl font-bold text-indigo-800 text-center">
+                            Week of {startDateFormatted} - {endDateFormatted}
+                        </div>
+                        <button onClick={handleNextWeek} className="p-2 bg-indigo-100 rounded-full hover:bg-indigo-200 transition font-semibold">
+                            Next Week &rarr;
+                        </button>
+                    </div>
+
+                    {isLoading ? (
+                        <div className="flex justify-center items-center h-48">
+                            <Icon name="Loader2" className="w-8 h-8 animate-spin text-indigo-500 mr-3" />
+                            <p className="text-gray-600">Loading roster data...</p>
+                        </div>
+                    ) : (
+                        <div className="overflow-x-auto rounded-lg border border-gray-200">
+                            <table className="roster-table min-w-full divide-y divide-gray-200">
+                                <thead className="bg-indigo-600 text-white">
+                                    <tr>
+                                        <th className="px-6 py-3 text-left text-sm font-medium uppercase tracking-wider min-w-[150px] sticky-left bg-indigo-600 z-20 shadow-md">
+                                            Day / Shift
+                                        </th>
+                                        {weekDays.map(day => (
+                                            <th key={day.toISOString()} className="px-6 py-3 text-center text-sm font-medium uppercase tracking-wider min-w-[120px]">
+                                                {getDayName(day)}
+                                                <div className="text-xs font-normal opacity-80">{day.getDate()}/{day.getMonth() + 1}</div>
+                                            </th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    {shifts.map(shift => (
+                                        <tr key={shift}>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 bg-gray-50 sticky-left z-10 border-r border-gray-200 shadow-sm">
+                                                {shift}
+                                            </td>
+                                            {weekDays.map(day => {
+                                                const dayName = getDayName(day);
+                                                const staff = getStaffForShift(dayName, shift);
+                                                return (
+                                                    <td 
+                                                        key={day.toISOString() + shift} 
+                                                        className="px-4 py-3 whitespace-nowrap text-sm text-gray-700 text-center hover:bg-indigo-50 transition duration-100 cursor-pointer border-l border-r"
+                                                        // NOTE: In a real application, clicking this cell would open a modal to edit the staff assignment.
+                                                        onClick={() => console.log(`Editing shift: ${shift} on ${dayName}`)}
+                                                    >
+                                                        <div className="min-h-[4rem] flex flex-col justify-center items-center space-y-1">
+                                                            {staff === 'Unassigned' ? (
+                                                                <span className="text-xs text-red-500 font-semibold italic">Unassigned</span>
+                                                            ) : (
+                                                                staff.split(', ').map((name, index) => (
+                                                                    <span key={index} className="text-sm font-medium text-gray-800 bg-indigo-100 px-2 py-0.5 rounded-full shadow-sm">
+                                                                        {name.trim()}
+                                                                    </span>
+                                                                ))
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+
+                    <div className="flex justify-end pt-4 border-t">
+                        <button
+                            onClick={handleSaveRoster}
+                            disabled={isSaving}
+                            className="flex items-center px-6 py-3 bg-indigo-600 text-white font-bold rounded-lg shadow-lg hover:bg-indigo-700 disabled:bg-indigo-400 transition duration-150 transform hover:scale-[1.01]"
+                        >
+                            {isSaving ? (
+                                <>
+                                    <Icon name="Loader2" className="w-5 h-5 mr-2 animate-spin" />
+                                    Saving...
+                                </>
+                            ) : (
+                                <>
+                                    <Icon name="Archive" className="w-5 h-5 mr-2" />
+                                    Save Roster (Mock)
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+
+        // --- Staff List Management Component ---
+
+        const StaffList = ({ employees, outlets, deleteEmployee, addEmployee, isAuthReady, userId }) => {
+            const [name, setName] = useState('');
+            const [role, setRole] = useState('');
+            const [joinedDate, setJoinedDate] = useState('');
+            const [assignedOutletId, setAssignedOutletId] = useState('');
+            const [employmentType, setEmploymentType] = useState('FT'); // Default to Full-Time
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (name.trim() && role.trim() && joinedDate && assignedOutletId && employmentType) {
+                    const assignedOutlet = outlets.find(o => o.id === assignedOutletId);
+                    
+                    addEmployee({ 
+                        name: name.trim(), 
+                        role: role.trim(),
+                        joinedDate: joinedDate, // YYYY-MM-DD string
+                        outletId: assignedOutletId,
+                        outletName: assignedOutlet ? assignedOutlet.name : 'Unknown',
+                        employmentType: employmentType
+                    });
+                    
+                    // Reset form
+                    setName('');
+                    setRole('');
+                    setJoinedDate('');
+                    setAssignedOutletId('');
+                    setEmploymentType('FT');
+                }
+            };
+
+            return (
+                <div className="w-full md:w-1/3 p-6 bg-white rounded-xl shadow-2xl">
+                    <h2 className="text-2xl font-bold text-indigo-700 mb-4 flex items-center">
+                        <Icon name="Users" className="w-6 h-6 mr-2 text-indigo-500" />
+                        Staff Members
+                    </h2>
+                    <form onSubmit={handleSubmit} className="space-y-3 mb-6">
+                        <input
+                            type="text"
+                            placeholder="Employee Name"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            required
+                        />
+                        <input
+                            type="text"
+                            placeholder="Role (e.g., Barista, Supervisor)"
+                            value={role}
+                            onChange={(e) => setRole(e.target.value)}
+                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            required
+                        />
+
+                        <div className="flex space-x-2">
+                            <div className="w-1/2">
+                                <label htmlFor="joined-date" className="block text-xs font-medium text-gray-500 mb-1">Joined Date</label>
+                                <input
+                                    type="date"
+                                    id="joined-date"
+                                    value={joinedDate}
+                                    onChange={(e) => setJoinedDate(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                                    required
+                                />
+                            </div>
+                            <div className="w-1/2">
+                                <label htmlFor="employment-type" className="block text-xs font-medium text-gray-500 mb-1">Type</label>
+                                <select
+                                    id="employment-type"
+                                    value={employmentType}
+                                    onChange={(e) => setEmploymentType(e.target.value)}
+                                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                                    required
+                                >
+                                    <option value="FT">Full-Time (FT)</option>
+                                    <option value="PT">Part-Time (PT)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <select
+                            value={assignedOutletId}
+                            onChange={(e) => setAssignedOutletId(e.target.value)}
+                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                            required
+                            disabled={outlets.length === 0}
+                        >
+                            <option value="" disabled>{outlets.length === 0 ? "No Outlets Available" : "Select Assigned Outlet"}</option>
+                            {outlets.map(outlet => (
+                                <option key={outlet.id} value={outlet.id}>{outlet.name}</option>
+                            ))}
+                        </select>
+
+                        <button
+                            type="submit"
+                            disabled={!isAuthReady || !userId || outlets.length === 0}
+                            className="w-full flex items-center justify-center p-3 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150 disabled:bg-gray-400"
+                        >
+                            <Icon name="PlusCircle" className="w-5 h-5 mr-2" />
+                            Add Staff
+                        </button>
+                         {outlets.length === 0 && (
+                            <p className="text-red-500 text-sm mt-2 text-center">Please add an outlet first before adding staff.</p>
+                        )}
+                    </form>
+
+                    <ul className="space-y-3 max-h-96 overflow-y-auto pr-2">
+                        {employees.map(employee => (
+                            <li key={employee.id} className="flex flex-col p-3 bg-indigo-50 rounded-lg shadow-sm border-l-4 border-indigo-400">
+                                <div className="flex justify-between items-start">
+                                    <div>
+                                        <p className="font-semibold text-gray-800">{employee.name} 
+                                            <span className={`ml-2 px-2 py-0.5 text-xs font-bold rounded-full ${employee.employmentType === 'FT' ? 'bg-green-200 text-green-800' : 'bg-yellow-200 text-yellow-800'}`}>
+                                                {employee.employmentType}
+                                            </span>
+                                        </p>
+                                        <p className="text-sm text-gray-600 flex items-center mt-1">
+                                            <Icon name="Clock" className="w-3 h-3 mr-1" />
+                                            {employee.role}
+                                        </p>
+                                        <p className="text-xs text-indigo-700 flex items-center mt-1">
+                                            <Icon name="MapPin" className="w-3 h-3 mr-1" />
+                                            {employee.outletName}
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => deleteEmployee(employee.id)}
+                                        className="text-red-500 hover:text-red-700 p-1 transition duration-150"
+                                    >
+                                        <Icon name="Trash2" className="w-5 h-5" />
+                                    </button>
+                                </div>
+                                <p className="text-xs text-gray-500 mt-2 pt-2 border-t border-indigo-200 flex items-center">
+                                    <Icon name="CalendarDays" className="w-3 h-3 mr-1" />
+                                    Joined: {employee.joinedDate}
+                                </p>
+                            </li>
+                        ))}
+                        {employees.length === 0 && (
+                            <li className="text-center text-gray-500 italic p-4 bg-gray-50 rounded-lg">No staff added yet.</li>
+                        )}
+                    </ul>
+                </div>
+            );
+        };
+
+        // --- Outlet List Component ---
+
+        const OutletList = ({ outlets, deleteOutlet, addOutlet, goToRoster, isAuthReady, userId }) => {
+            const [name, setName] = useState('');
+            const [location, setLocation] = useState('');
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (name.trim() && location.trim()) {
+                    addOutlet({ name: name.trim(), location: location.trim() });
+                    setName('');
+                    setLocation('');
+                }
+            };
+
+            return (
+                <div className="w-full md:w-2/3 p-6 bg-white rounded-xl shadow-2xl">
+                    <h2 className="text-2xl font-bold text-indigo-700 mb-4 flex items-center">
+                        <Icon name="MapPin" className="w-6 h-6 mr-2 text-indigo-500" />
+                        Coffee Outlets
+                    </h2>
+                    <form onSubmit={handleSubmit} className="space-y-3 mb-6">
+                        <input
+                            type="text"
+                            placeholder="Outlet Name (e.g., Mid Valley Branch)"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            required
+                        />
+                        <input
+                            type="text"
+                            placeholder="Location"
+                            value={location}
+                            onChange={(e) => setLocation(e.target.value)}
+                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            required
+                        />
+                        <button
+                            type="submit"
+                            disabled={!isAuthReady || !userId}
+                            className="w-full flex items-center justify-center p-3 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150 disabled:bg-gray-400"
+                        >
+                            <Icon name="PlusCircle" className="w-5 h-5 mr-2" />
+                            Add Outlet
+                        </button>
+                    </form>
+
+                    <ul className="space-y-3 max-h-96 overflow-y-auto pr-2">
+                        {outlets.map(outlet => (
+                            <li key={outlet.id} className="flex flex-col md:flex-row items-start md:items-center justify-between p-4 bg-indigo-100 rounded-xl shadow-md transition duration-200 hover:shadow-lg">
+                                <div className="flex-grow mb-2 md:mb-0">
+                                    <p className="font-bold text-lg text-indigo-800 flex items-center">
+                                        <Icon name="MapPin" className="w-4 h-4 mr-2 text-indigo-600" />
+                                        {outlet.name}
+                                    </p>
+                                    <p className="text-sm text-gray-700 ml-6">
+                                        <Icon name="Clock" className="w-3 h-3 inline mr-1" />
+                                        {outlet.location}
+                                    </p>
+                                </div>
+                                <div className="flex space-x-2">
+                                    <button
+                                        onClick={() => goToRoster(outlet)}
+                                        className="px-3 py-1 bg-indigo-500 text-white text-sm font-semibold rounded-lg shadow hover:bg-indigo-600 transition duration-150 flex items-center"
+                                    >
+                                        <Icon name="Calendar" className="w-4 h-4 mr-1" />
+                                        Roster Schedule
+                                    </button>
+                                    <button
+                                        onClick={() => deleteOutlet(outlet.id)}
+                                        className="text-red-500 bg-white p-2 rounded-full shadow hover:bg-red-100 transition duration-150"
+                                    >
+                                        <Icon name="Trash2" className="w-5 h-5" />
+                                    </button>
+                                </div>
+                            </li>
+                        ))}
+                        {outlets.length === 0 && (
+                            <li className="text-center text-gray-500 italic p-4 bg-gray-50 rounded-lg">No outlets added yet.</li>
+                        )}
+                    </ul>
+                </div>
+            );
+        };
+
+        // --- Main Application Component ---
+
+        const App = () => {
+            const [dbInstance, setDbInstance] = useState(null);
+            const [authInstance, setAuthInstance] = useState(null);
+            const [userId, setUserId] = useState(null);
+            const [isAuthReady, setIsAuthReady] = useState(false);
+            const [outlets, setOutlets] = useState([]);
+            const [employees, setEmployees] = useState([]);
+            
+            // State for navigation
+            const [currentPage, setCurrentPage] = useState('dashboard'); // 'dashboard' or 'roster'
+            const [selectedOutlet, setSelectedOutlet] = useState(null); // Stores the whole outlet object
+
+            // 1. Firebase Initialization and Authentication
+            useEffect(() => {
+                let app, db, auth;
+                if (!dbInstance) {
+                    try {
+                        app = initializeApp(firebaseConfig);
+                        db = getFirestore(app);
+                        auth = getAuth(app);
+                        setDbInstance(db);
+                        setAuthInstance(auth);
+
+                        // Set up authentication listener
+                        const unsubscribe = onAuthStateChanged(auth, async (user) => {
+                            if (user) {
+                                setUserId(user.uid);
+                            } else {
+                                // Sign in anonymously if no token or current user
+                                try {
+                                    const anonymousUser = await signInAnonymously(auth);
+                                    setUserId(anonymousUser.user.uid);
+                                } catch (e) {
+                                    console.error("Anonymous sign-in failed:", e);
+                                    setUserId(crypto.randomUUID());
+                                }
+                            }
+                            setIsAuthReady(true);
+                        });
+
+                        // Sign in with custom token if available
+                        if (initialAuthToken) {
+                            signInWithCustomToken(auth, initialAuthToken).catch(e => {
+                                console.error("Custom token sign-in failed:", e);
+                            });
+                        }
+
+                        return () => unsubscribe();
+
+                    } catch (error) {
+                        console.error("Firebase initialization failed:", error);
+                    }
+                }
+            }, []);
+
+            // 2. Data Listeners (Outlets and Employees)
+            useEffect(() => {
+                if (!isAuthReady || !userId || !dbInstance) return;
+
+                // Listener for Outlets
+                const unsubscribeOutlets = onSnapshot(collection(dbInstance, OutletPath(userId)), (snapshot) => {
+                    const newOutlets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setOutlets(newOutlets);
+                }, (error) => {
+                    console.error("Error fetching outlets:", error);
+                });
+
+                // Listener for Employees
+                const unsubscribeEmployees = onSnapshot(collection(dbInstance, EmployeePath(userId)), (snapshot) => {
+                    const newEmployees = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setEmployees(newEmployees);
+                }, (error) => {
+                    console.error("Error fetching employees:", error);
+                });
+
+                return () => {
+                    unsubscribeOutlets();
+                    unsubscribeEmployees();
+                };
+            }, [isAuthReady, userId, dbInstance]);
+
+            // --- CRUD Operations ---
+
+            const addOutlet = async (outletData) => {
+                if (!dbInstance || !userId) return;
+                try {
+                    const outletRef = doc(collection(dbInstance, OutletPath(userId)));
+                    await withExponentialBackoff(() => setDoc(outletRef, { ...outletData, createdAt: new Date().toISOString() }));
+                } catch (e) {
+                    console.error("Error adding outlet: ", e);
+                }
+            };
+
+            const deleteOutlet = async (id) => {
+                if (!dbInstance || !userId) return;
+                try {
+                    await withExponentialBackoff(() => deleteDoc(doc(dbInstance, OutletPath(userId), id)));
+                } catch (e) {
+                    console.error("Error deleting outlet: ", e);
+                }
+            };
+
+            const addEmployee = async (employeeData) => {
+                if (!dbInstance || !userId) return;
+                try {
+                    const employeeRef = doc(collection(dbInstance, EmployeePath(userId)));
+                    await withExponentialBackoff(() => setDoc(employeeRef, { ...employeeData, createdAt: new Date().toISOString() }));
+                } catch (e) {
+                    console.error("Error adding employee: ", e);
+                }
+            };
+
+            const deleteEmployee = async (id) => {
+                if (!dbInstance || !userId) return;
+                try {
+                    await withExponentialBackoff(() => deleteDoc(doc(dbInstance, EmployeePath(userId), id)));
+                } catch (e) {
+                    console.error("Error deleting employee: ", e);
+                }
+            };
+            
+            // --- Navigation Handlers ---
+
+            const goToRoster = (outlet) => {
+                setSelectedOutlet(outlet);
+                setCurrentPage('roster');
+            };
+
+            const goBackToDashboard = () => {
+                setSelectedOutlet(null);
+                setCurrentPage('dashboard');
+            };
+
+            // --- View Renderer ---
+
+            const renderContent = () => {
+
+                switch (currentPage) {
+                    case 'dashboard':
+                        return (
+                            <>
+                                {/* Main dashboard content area */}
+                                <div className="max-w-7xl mx-auto flex flex-col md:flex-row gap-6 p-4">
+                                    <StaffList
+                                        employees={employees}
+                                        outlets={outlets}
+                                        deleteEmployee={deleteEmployee}
+                                        addEmployee={addEmployee}
+                                        isAuthReady={isAuthReady}
+                                        userId={userId}
+                                    />
+                                    <OutletList
+                                        outlets={outlets}
+                                        deleteOutlet={deleteOutlet}
+                                        addOutlet={addOutlet}
+                                        goToRoster={goToRoster}
+                                        isAuthReady={isAuthReady}
+                                        userId={userId}
+                                    />
+                                </div>
+                                {/* Display User ID for debugging/sharing */}
+                                <div className="max-w-7xl mx-auto text-center mt-6 p-4 text-sm text-gray-500">
+                                    User ID: <span className="font-mono text-gray-700">{userId || (isAuthReady ? 'N/A (Auth Failed)' : 'Authenticating...')}</span>
+                                </div>
+                            </>
+                        );
+
+                    case 'roster':
+                        if (!selectedOutlet) {
+                            return (
+                                <div className="text-center p-8 bg-white rounded-xl shadow-lg max-w-xl mx-auto mt-8">
+                                    <p className="text-xl text-red-500">Outlet not found or selected.</p>
+                                    <button onClick={goBackToDashboard} className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                                        Go Back
+                                    </button>
+                                </div>
+                            );
+                        }
+                        return (
+                            <RosterManagement
+                                outlet={selectedOutlet}
+                                employees={employees}
+                                goBack={goBackToDashboard}
+                                db={dbInstance}
+                                auth={authInstance}
+                            />
+                        );
+
+                    default:
+                        return (
+                            <div className="text-center p-8">
+                                <p className="text-xl text-red-500">Unknown page.</p>
+                            </div>
+                        );
+                }
+            };
+
+
+            return (
+                <div className="min-h-screen bg-gray-100 font-sans">
+                    {/* The new persistent header component */}
+                    <NavBar 
+                        isAuthReady={isAuthReady} 
+                        currentPage={currentPage}
+                        goToDashboard={goBackToDashboard}
+                    />
+
+                    {renderContent()}
+
+                </div>
+            );
+        };
+
+        // Render the application to the root element
+        // Ensure this is inside a window.onload or similar structure if necessary, 
+        // but since it's the last script, it should run once all prior resources are loaded.
+        try {
+            const root = ReactDOM.createRoot(document.getElementById('root'));
+            root.render(<App />);
+        } catch(e) {
+            console.error("ReactDOM render failed:", e);
+        }
+
+    </script>
+</body>
+</html>
