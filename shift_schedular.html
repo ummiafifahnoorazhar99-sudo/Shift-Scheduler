@@ -1,711 +1,421 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, collection, onSnapshot, setDoc, deleteDoc, query, where, arrayUnion, arrayRemove, writeBatch } from 'firebase/firestore';
-import { Archive, PlusCircle, Trash2, Home, Calendar, Clock, MapPin, Users, Loader2, DollarSign, CalendarDays } from 'lucide-react';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Team Shift Scheduler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8f9fa;
+        }
+        .header-bg {
+            background-color: #3b82f6; /* Blue 500 */
+        }
+        .shift-cell {
+            min-height: 4rem; /* Ensure cells are tall enough for tapping */
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .shift-cell.occupied {
+            background-color: #e0f2fe; /* Light Blue 100 */
+            border-left: 4px solid #3b82f6;
+        }
+        .shift-cell:hover {
+            background-color: #f1f5f9; /* Slate 100 */
+        }
+        .occupied:hover {
+            background-color: #bae6fd; /* Light Blue 200 on hover */
+        }
+        .scroll-container {
+            /* Enable horizontal scrolling on small screens for the table */
+            overflow-x: auto;
+        }
+        /* Custom scrollbar for aesthetics */
+        .scroll-container::-webkit-scrollbar {
+            height: 8px;
+        }
+        .scroll-container::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
 
-// --- Global Firebase Configuration (Mandatory) ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-// Helper to handle exponential backoff for retries
-const withExponentialBackoff = async (fn, maxRetries = 5, delay = 1000) => {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (i === maxRetries - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, delay * 2 ** i));
-      // console.warn(`Retry attempt ${i + 1} failed, retrying in ${delay * 2 ** i}ms.`, error.message);
-    }
-  }
-};
-
-// --- Firebase Initialization and Utility Functions ---
-
-let app, db, auth;
-
-const OutletPath = (userId) => `/artifacts/${appId}/users/${userId}/outlets`;
-const EmployeePath = (userId) => `/artifacts/${appId}/users/${userId}/employees`;
-const RosterPath = (userId, outletId) => `/artifacts/${appId}/users/${userId}/outlets/${outletId}/rosters`;
-
-// Roster data structure placeholder
-const mockRosterData = [
-    { day: 'Monday', shift: 'Morning (8am - 4pm)', staff: ['Alice', 'Bob'] },
-    { day: 'Monday', shift: 'Evening (4pm - 12am)', staff: ['Charlie', 'David'] },
-    { day: 'Tuesday', shift: 'Morning (8am - 4pm)', staff: ['Eve', 'Frank'] },
-    { day: 'Tuesday', shift: 'Evening (4pm - 12am)', staff: ['Grace', 'Heidi'] },
-    // Add more mock data as needed
-];
-
-// --- NavBar Component (New Header) ---
-
-const NavBar = ({ isAuthReady, currentPage, goToDashboard }) => (
-    <nav className="bg-indigo-700 shadow-xl text-white p-4 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto flex justify-between items-center">
-            {/* Logo and Title */}
-            <div className="flex items-center space-x-3">
-                <Calendar className="w-7 h-7" />
-                <h1 className="text-2xl font-bold tracking-wider">
-                    ZUS Coffee Staff & Roster Manager
-                </h1>
-            </div>
-
-            {/* Navigation and Status */}
-            <div className="flex items-center space-x-4">
-                {currentPage !== 'dashboard' && (
-                    <button
-                        onClick={goToDashboard}
-                        className="flex items-center px-3 py-2 bg-indigo-500 hover:bg-indigo-400 rounded-lg transition duration-150 font-medium shadow-md"
-                    >
-                        <Home className="w-4 h-4 mr-2" />
-                        Dashboard
-                    </button>
-                )}
-                {!isAuthReady && (
-                    <div className="flex items-center text-indigo-200 text-sm">
-                        <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                        Initializing...
-                    </div>
-                )}
-                {isAuthReady && (
-                     <div className="hidden sm:block text-indigo-200 text-sm">
-                        Ready
-                    </div>
-                )}
+    <!-- Header Section -->
+    <header class="header-bg p-4 shadow-lg text-white">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+            <h1 class="text-2xl font-bold">ZUS Coffee Shift Planner</h1>
+            <div id="auth-status" class="text-sm bg-blue-700 py-1 px-3 rounded-full">
+                Loading User...
             </div>
         </div>
-    </nav>
-);
+    </header>
 
-
-// --- Roster Management Component (New) ---
-
-const RosterManagement = ({ outlet, employees, goBack, db, auth }) => {
-    const [roster, setRoster] = useState([]);
-    const [isLoading, setIsLoading] = useState(true);
-    const [isSaving, setIsSaving] = useState(false);
-    const [weekStart, setWeekStart] = useState(new Date());
-
-    const getFormattedDate = (date) => {
-        return date.toISOString().split('T')[0];
-    };
-
-    // Calculate the start of the current week (Sunday)
-    const calculateWeekStart = (date) => {
-        const d = new Date(date);
-        const day = d.getDay(); // 0 is Sunday, 6 is Saturday
-        const diff = d.getDate() - day;
-        d.setDate(diff);
-        d.setHours(0, 0, 0, 0);
-        return d;
-    };
-
-    useEffect(() => {
-        setWeekStart(calculateWeekStart(new Date()));
-    }, []);
-
-    // Placeholder function to fetch/listen to a mock roster for the selected week
-    const fetchRoster = useCallback(async () => {
-        if (!db || !auth || !auth.currentUser) return;
-        setIsLoading(true);
-
-        // In a real app, this would query the RosterPath for the specific weekStart date.
-        // For this example, we use mock data and a timeout to simulate loading.
-        setTimeout(() => {
-            setRoster(mockRosterData);
-            setIsLoading(false);
-        }, 800);
-
-    }, [db, auth, outlet.id, weekStart]); // Include all external dependencies
-
-    useEffect(() => {
-        fetchRoster();
-    }, [fetchRoster]);
-
-    const handleSaveRoster = async () => {
-        if (!db || !auth || !auth.currentUser) return;
-        setIsSaving(true);
-        // Placeholder for saving logic
-        await new Promise(resolve => setTimeout(resolve, 500));
-        setIsSaving(false);
-        console.log("Roster saved for outlet:", outlet.name);
-    };
-
-    const getDayName = (date) => {
-        return date.toLocaleDateString('en-US', { weekday: 'long' });
-    };
-
-    const getWeekDays = (start) => {
-        const days = [];
-        for (let i = 0; i < 7; i++) {
-            const day = new Date(start);
-            day.setDate(start.getDate() + i);
-            days.push(day);
-        }
-        return days;
-    };
-
-    const weekDays = getWeekDays(weekStart);
-
-    const handlePreviousWeek = () => {
-        const newDate = new Date(weekStart);
-        newDate.setDate(weekStart.getDate() - 7);
-        setWeekStart(newDate);
-    };
-
-    const handleNextWeek = () => {
-        const newDate = new Date(weekStart);
-        newDate.setDate(weekStart.getDate() + 7);
-        setWeekStart(newDate);
-    };
-
-    return (
-        <div className="p-6 bg-white rounded-xl shadow-2xl space-y-6 max-w-7xl mx-auto mt-8">
-            <div className="flex items-center justify-between border-b pb-4 mb-4">
-                <h2 className="text-3xl font-extrabold text-indigo-700 flex items-center">
-                    <Calendar className="w-8 h-8 mr-3 text-indigo-500" />
-                    Roster for {outlet.name}
-                </h2>
-                <button
-                    onClick={goBack}
-                    className="flex items-center px-4 py-2 bg-gray-100 text-gray-700 font-semibold rounded-lg shadow hover:bg-gray-200 transition duration-150"
-                >
-                    <Home className="w-5 h-5 mr-2" />
-                    Back to Dashboard
-                </button>
-            </div>
-
-            <div className="flex justify-between items-center bg-indigo-50 p-3 rounded-lg shadow-inner">
-                <button onClick={handlePreviousWeek} className="p-2 bg-indigo-100 rounded-full hover:bg-indigo-200 transition">
-                    &larr; Previous Week
-                </button>
-                <div className="text-xl font-bold text-indigo-800">
-                    {weekDays[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - {weekDays[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+    <main class="flex-grow p-4 md:p-8">
+        <div class="max-w-7xl mx-auto">
+            
+            <section class="mb-8 p-4 bg-white rounded-xl shadow-lg">
+                <h2 class="text-xl font-semibold mb-3 text-gray-800">My Shift Configuration</h2>
+                <div class="flex flex-col sm:flex-row gap-4">
+                    <div class="flex-1">
+                        <label for="shift-name" class="block text-sm font-medium text-gray-700">My Name / ID</label>
+                        <input type="text" id="shift-name" placeholder="E.g., Adam (A101)" class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+                    </div>
+                    <div class="flex-1">
+                        <label for="shift-time" class="block text-sm font-medium text-gray-700">My Shift Time</label>
+                        <input type="text" id="shift-time" placeholder="E.g., 9:00 AM - 5:00 PM" class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+                    </div>
                 </div>
-                <button onClick={handleNextWeek} className="p-2 bg-indigo-100 rounded-full hover:bg-indigo-200 transition">
-                    Next Week &rarr;
-                </button>
-            </div>
+            </section>
 
-            {isLoading ? (
-                <div className="flex justify-center items-center h-48">
-                    <Loader2 className="w-8 h-8 animate-spin text-indigo-500 mr-3" />
-                    <p className="text-gray-600">Loading roster data...</p>
-                </div>
-            ) : (
-                <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                        <thead className="bg-indigo-600 text-white">
-                            <tr>
-                                <th className="px-6 py-3 text-left text-sm font-medium uppercase tracking-wider min-w-[150px] sticky left-0 bg-indigo-600 z-20">
-                                    Day / Shift
-                                </th>
-                                {weekDays.map(day => (
-                                    <th key={day} className="px-6 py-3 text-center text-sm font-medium uppercase tracking-wider min-w-[120px]">
-                                        {getDayName(day)}
-                                        <div className="text-xs font-normal opacity-80">{day.getDate()}/{day.getMonth() + 1}</div>
-                                    </th>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-200">
-                            {['Morning (8am - 4pm)', 'Evening (4pm - 12am)'].map(shift => (
-                                <tr key={shift}>
-                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 bg-gray-50 sticky left-0 z-10 border-r border-gray-200">
-                                        {shift}
-                                    </td>
-                                    {weekDays.map(day => (
-                                        <td key={getDayName(day)} className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 text-center hover:bg-indigo-50 transition duration-100 cursor-pointer border-l border-r">
-                                            {/* Placeholder for staff assignment input/display */}
-                                            <div className="min-h-[4rem] flex flex-col justify-center items-center">
-                                                <span className="text-xs text-indigo-500 font-semibold">Click to Assign</span>
-                                                {/* In a real app, logic would go here to display assigned staff */}
-                                                <div className="text-xs text-gray-500">
-                                                    {mockRosterData.filter(r => r.day === getDayName(day) && r.shift === shift).flatMap(r => r.staff).join(', ')}
-                                                </div>
-                                            </div>
-                                        </td>
-                                    ))}
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+            <h2 class="text-2xl font-bold mb-4 text-gray-800">Weekly Schedule</h2>
 
-            <div className="flex justify-end pt-4 border-t">
-                <button
-                    onClick={handleSaveRoster}
-                    disabled={isSaving}
-                    className="flex items-center px-6 py-3 bg-indigo-600 text-white font-bold rounded-lg shadow-lg hover:bg-indigo-700 disabled:bg-indigo-400 transition duration-150 transform hover:scale-[1.01]"
-                >
-                    {isSaving ? (
-                        <>
-                            <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                            Saving...
-                        </>
-                    ) : (
-                        <>
-                            <Archive className="w-5 h-5 mr-2" />
-                            Save Roster
-                        </>
-                    )}
-                </button>
+            <!-- Shift Table Container (Scrollable on small screens) -->
+            <div class="scroll-container bg-white rounded-xl shadow-lg">
+                <table id="shift-table" class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/12">Shift</th>
+                            <!-- Days of the week are populated by JS -->
+                        </tr>
+                    </thead>
+                    <tbody id="table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Rows are populated by JS -->
+                    </tbody>
+                </table>
             </div>
+            
+            <p id="error-message" class="mt-4 text-red-500 font-medium hidden"></p>
         </div>
-    );
-};
+    </main>
+
+    <!-- Modal for displaying shift details -->
+    <div id="shift-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center p-4 z-50" onclick="closeModal()">
+        <div class="bg-white rounded-xl p-6 w-full max-w-sm shadow-2xl" onclick="event.stopPropagation()">
+            <h3 id="modal-title" class="text-xl font-bold text-gray-900 mb-4">Shift Details</h3>
+            <p id="modal-details" class="text-gray-700 mb-6 whitespace-pre-wrap"></p>
+            <button onclick="closeModal()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-150">Close</button>
+        </div>
+    </div>
 
 
-// --- Staff List Management Component ---
+    <!-- Firebase Configuration and Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, runTransaction, getDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-const StaffList = ({ employees, outlets, deleteEmployee, addEmployee, isAuthReady, userId }) => {
-    const [name, setName] = useState('');
-    const [role, setRole] = useState('');
-    const [joinedDate, setJoinedDate] = useState('');
-    const [assignedOutletId, setAssignedOutletId] = useState('');
-    const [employmentType, setEmploymentType] = useState('FT'); // Default to Full-Time
+        // IMPORTANT: Global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Firestore setup
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
 
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        if (name.trim() && role.trim() && joinedDate && assignedOutletId && employmentType) {
-            const assignedOutlet = outlets.find(o => o.id === assignedOutletId);
-            
-            addEmployee({ 
-                name: name.trim(), 
-                role: role.trim(),
-                joinedDate: joinedDate, // YYYY-MM-DD string
-                outletId: assignedOutletId,
-                outletName: assignedOutlet ? assignedOutlet.name : 'Unknown',
-                employmentType: employmentType
-            });
-            
-            // Reset form
-            setName('');
-            setRole('');
-            setJoinedDate('');
-            setAssignedOutletId('');
-            setEmploymentType('FT');
-        }
-    };
+        const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+        const SHIFTS = ['Morning', 'Midday', 'Evening']; // Example shifts
 
-    return (
-        <div className="w-full md:w-1/3 p-6 bg-white rounded-xl shadow-2xl">
-            <h2 className="text-2xl font-bold text-indigo-700 mb-4 flex items-center">
-                <Users className="w-6 h-6 mr-2 text-indigo-500" />
-                Staff Members
-            </h2>
-            <form onSubmit={handleSubmit} className="space-y-3 mb-6">
-                <input
-                    type="text"
-                    placeholder="Employee Name"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                    required
-                />
-                <input
-                    type="text"
-                    placeholder="Role (e.g., Barista, Supervisor)"
-                    value={role}
-                    onChange={(e) => setRole(e.target.value)}
-                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                    required
-                />
+        const tableBody = document.getElementById('table-body');
+        const shiftNameInput = document.getElementById('shift-name');
+        const shiftTimeInput = document.getElementById('shift-time');
+        const authStatus = document.getElementById('auth-status');
+        const errorMessage = document.getElementById('error-message');
+        const shiftModal = document.getElementById('shift-modal');
+        const modalTitle = document.getElementById('modal-title');
+        const modalDetails = document.getElementById('modal-details');
 
-                <div className="flex space-x-2">
-                    <div className="w-1/2">
-                        <label htmlFor="joined-date" className="block text-xs font-medium text-gray-500 mb-1">Joined Date</label>
-                        <input
-                            type="date"
-                            id="joined-date"
-                            value={joinedDate}
-                            onChange={(e) => setJoinedDate(e.target.value)}
-                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                            required
-                        />
-                    </div>
-                    <div className="w-1/2">
-                        <label htmlFor="employment-type" className="block text-xs font-medium text-gray-500 mb-1">Type</label>
-                        <select
-                            id="employment-type"
-                            value={employmentType}
-                            onChange={(e) => setEmploymentType(e.target.value)}
-                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                            required
-                        >
-                            <option value="FT">Full-Time (FT)</option>
-                            <option value="PT">Part-Time (PT)</option>
-                        </select>
-                    </div>
-                </div>
+        setLogLevel('Debug'); // Enable debug logging for Firebase
 
-                <select
-                    value={assignedOutletId}
-                    onChange={(e) => setAssignedOutletId(e.target.value)}
-                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 bg-white"
-                    required
-                >
-                    <option value="" disabled>Select Assigned Outlet</option>
-                    {outlets.map(outlet => (
-                        <option key={outlet.id} value={outlet.id}>{outlet.name}</option>
-                    ))}
-                </select>
+        // Utility function for exponential backoff retry logic
+        const fetchWithRetry = async (apiCall, maxRetries = 5) => {
+            let attempt = 0;
+            while (attempt < maxRetries) {
+                try {
+                    return await apiCall();
+                } catch (error) {
+                    attempt++;
+                    if (attempt >= maxRetries) {
+                        console.error("API call failed after max retries:", error);
+                        throw error;
+                    }
+                    const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                    console.warn(`Attempt ${attempt} failed. Retrying in ${delay.toFixed(0)}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        };
 
-                <button
-                    type="submit"
-                    disabled={!isAuthReady || !userId || outlets.length === 0}
-                    className="w-full flex items-center justify-center p-3 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150 disabled:bg-gray-400"
-                >
-                    <PlusCircle className="w-5 h-5 mr-2" />
-                    Add Staff
-                </button>
-                 {outlets.length === 0 && (
-                    <p className="text-red-500 text-sm mt-2 text-center">Please add an outlet first before adding staff.</p>
-                )}
-            </form>
 
-            <ul className="space-y-3 max-h-96 overflow-y-auto pr-2">
-                {employees.map(employee => (
-                    <li key={employee.id} className="flex flex-col p-3 bg-indigo-50 rounded-lg shadow-sm border-l-4 border-indigo-400">
-                        <div className="flex justify-between items-start">
-                            <div>
-                                <p className="font-semibold text-gray-800">{employee.name} 
-                                    <span className={`ml-2 px-2 py-0.5 text-xs font-bold rounded-full ${employee.employmentType === 'FT' ? 'bg-green-200 text-green-800' : 'bg-yellow-200 text-yellow-800'}`}>
-                                        {employee.employmentType}
-                                    </span>
-                                </p>
-                                <p className="text-sm text-gray-600 flex items-center mt-1">
-                                    <Clock className="w-3 h-3 mr-1" />
-                                    {employee.role}
-                                </p>
-                                <p className="text-xs text-indigo-700 flex items-center mt-1">
-                                    <MapPin className="w-3 h-3 mr-1" />
-                                    {employee.outletName}
-                                </p>
+        // --- UI Rendering ---
+
+        function renderTable(shiftsData) {
+            // Re-render the table header (only days)
+            const tableHead = document.querySelector('#shift-table thead tr');
+            if (tableHead.children.length === 1) {
+                DAYS.forEach(day => {
+                    const th = document.createElement('th');
+                    th.className = 'px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/7';
+                    th.textContent = day.substring(0, 3); // Use abbreviation for mobile
+                    tableHead.appendChild(th);
+                });
+            }
+
+            // Clear existing rows
+            tableBody.innerHTML = ''; 
+
+            SHIFTS.forEach(shiftName => {
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-gray-50 transition duration-150';
+
+                // Shift Name Cell (e.g., Morning)
+                const shiftCell = document.createElement('td');
+                shiftCell.className = 'px-3 py-3 whitespace-nowrap text-sm font-medium text-gray-900 border-r bg-gray-50/50';
+                shiftCell.textContent = shiftName;
+                row.appendChild(shiftCell);
+
+                DAYS.forEach(day => {
+                    const cellId = `${day}-${shiftName}`;
+                    const cellData = shiftsData[cellId] || {};
+                    const isOccupied = Object.keys(cellData).length > 0;
+                    
+                    const td = document.createElement('td');
+                    td.id = cellId;
+                    td.className = `shift-cell px-3 py-3 text-xs text-gray-700 align-top ${isOccupied ? 'occupied' : 'bg-white'}`;
+                    
+                    // Display registered users
+                    td.innerHTML = Object.entries(cellData).map(([id, info]) => {
+                        const isCurrentUser = id === userId;
+                        const userDisplay = info.name || `User (${id.substring(0, 4)}...)`;
+                        const shiftDisplay = info.time || '';
+                        
+                        return `
+                            <div class="mb-1 p-1 rounded-md text-white ${isCurrentUser ? 'bg-blue-500 shadow' : 'bg-gray-400'} font-medium">
+                                ${userDisplay}
+                                <span class="block text-xs font-normal opacity-90">${shiftDisplay}</span>
                             </div>
-                            <button
-                                onClick={() => deleteEmployee(employee.id)}
-                                className="text-red-500 hover:text-red-700 p-1 transition duration-150"
-                            >
-                                <Trash2 className="w-5 h-5" />
-                            </button>
-                        </div>
-                        <p className="text-xs text-gray-500 mt-2 pt-2 border-t border-indigo-200 flex items-center">
-                            <CalendarDays className="w-3 h-3 mr-1" />
-                            Joined: {employee.joinedDate}
-                        </p>
-                    </li>
-                ))}
-                {employees.length === 0 && (
-                    <li className="text-center text-gray-500 italic p-4 bg-gray-50 rounded-lg">No staff added yet.</li>
-                )}
-            </ul>
-        </div>
-    );
-};
+                        `;
+                    }).join('');
 
-// --- Outlet List Component ---
-
-const OutletList = ({ outlets, deleteOutlet, addOutlet, goToRoster, isAuthReady, userId }) => {
-    const [name, setName] = useState('');
-    const [location, setLocation] = useState('');
-
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        if (name.trim() && location.trim()) {
-            addOutlet({ name: name.trim(), location: location.trim() });
-            setName('');
-            setLocation('');
+                    td.onclick = (e) => handleCellClick(e, day, shiftName, cellData);
+                    row.appendChild(td);
+                });
+                tableBody.appendChild(row);
+            });
         }
-    };
 
-    return (
-        <div className="w-full md:w-2/3 p-6 bg-white rounded-xl shadow-2xl">
-            <h2 className="text-2xl font-bold text-indigo-700 mb-4 flex items-center">
-                <MapPin className="w-6 h-6 mr-2 text-indigo-500" />
-                Coffee Outlets
-            </h2>
-            <form onSubmit={handleSubmit} className="space-y-3 mb-6">
-                <input
-                    type="text"
-                    placeholder="Outlet Name (e.g., Mid Valley Branch)"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                    required
-                />
-                <input
-                    type="text"
-                    placeholder="Location"
-                    value={location}
-                    onChange={(e) => setLocation(e.target.value)}
-                    className="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                    required
-                />
-                <button
-                    type="submit"
-                    disabled={!isAuthReady || !userId}
-                    className="w-full flex items-center justify-center p-3 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150 disabled:bg-gray-400"
-                >
-                    <PlusCircle className="w-5 h-5 mr-2" />
-                    Add Outlet
-                </button>
-            </form>
 
-            <ul className="space-y-3 max-h-96 overflow-y-auto pr-2">
-                {outlets.map(outlet => (
-                    <li key={outlet.id} className="flex flex-col md:flex-row items-start md:items-center justify-between p-4 bg-indigo-100 rounded-xl shadow-md transition duration-200 hover:shadow-lg">
-                        <div className="flex-grow mb-2 md:mb-0">
-                            <p className="font-bold text-lg text-indigo-800 flex items-center">
-                                <MapPin className="w-4 h-4 mr-2 text-indigo-600" />
-                                {outlet.name}
-                            </p>
-                            <p className="text-sm text-gray-700 ml-6">
-                                <Clock className="w-3 h-3 inline mr-1" />
-                                {outlet.location}
-                            </p>
-                        </div>
-                        <div className="flex space-x-2">
-                            <button
-                                onClick={() => goToRoster(outlet)}
-                                className="px-3 py-1 bg-indigo-500 text-white text-sm font-semibold rounded-lg shadow hover:bg-indigo-600 transition duration-150 flex items-center"
-                            >
-                                <Calendar className="w-4 h-4 mr-1" />
-                                Roster Schedule
-                            </button>
-                            <button
-                                onClick={() => deleteOutlet(outlet.id)}
-                                className="text-red-500 bg-white p-2 rounded-full shadow hover:bg-red-100 transition duration-150"
-                            >
-                                <Trash2 className="w-5 h-5" />
-                            </button>
-                        </div>
-                    </li>
-                ))}
-                {outlets.length === 0 && (
-                    <li className="text-center text-gray-500 italic p-4 bg-gray-50 rounded-lg">No outlets added yet.</li>
-                )}
-            </ul>
-        </div>
-    );
-};
+        // --- Firestore Operations ---
 
-// --- Main Application Component ---
+        const SHIFT_DOC_ID = 'weeklySchedule';
+        const PUBLIC_COLLECTION_PATH = `artifacts/${appId}/public/data/shifts`;
 
-const App = () => {
-    const [dbInstance, setDbInstance] = useState(null);
-    const [authInstance, setAuthInstance] = useState(null);
-    const [userId, setUserId] = useState(null);
-    const [isAuthReady, setIsAuthReady] = useState(false);
-    const [outlets, setOutlets] = useState([]);
-    const [employees, setEmployees] = useState([]);
-    
-    // State for navigation
-    const [currentPage, setCurrentPage] = useState('dashboard'); // 'dashboard' or 'roster'
-    const [selectedOutlet, setSelectedOutlet] = useState(null); // Stores the whole outlet object
+        const getShiftDocRef = () => doc(db, PUBLIC_COLLECTION_PATH, SHIFT_DOC_ID);
 
-    // 1. Firebase Initialization and Authentication
-    useEffect(() => {
-        if (!app) {
+        function showMessage(message, isError = true) {
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+            if (!isError) {
+                errorMessage.classList.add('text-green-500');
+                errorMessage.classList.remove('text-red-500');
+            } else {
+                errorMessage.classList.add('text-red-500');
+                errorMessage.classList.remove('text-green-500');
+            }
+            setTimeout(() => {
+                errorMessage.classList.add('hidden');
+                errorMessage.classList.remove('text-green-500');
+            }, 5000);
+        }
+
+        async function updateShift(day, shiftName) {
+            const docRef = getShiftDocRef();
+            const cellId = `${day}-${shiftName}`;
+            const userName = shiftNameInput.value.trim();
+            const shiftTime = shiftTimeInput.value.trim();
+            
+            if (!userName || !shiftTime) {
+                showModal("Configuration Required", "Please enter your Name/ID and your Shift Time in the section above before marking a shift.");
+                return;
+            }
+
+            try {
+                await fetchWithRetry(async () => {
+                    await runTransaction(db, async (transaction) => {
+                        const sfDoc = await transaction.get(docRef);
+                        const currentData = sfDoc.exists() ? sfDoc.data() : {};
+                        const cellData = currentData[cellId] || {};
+
+                        const userIsRegistered = cellData.hasOwnProperty(userId);
+
+                        if (userIsRegistered) {
+                            // User is already registered, so unregister them (remove their shift)
+                            delete cellData[userId];
+                            showMessage(`Shift removed for ${day}, ${shiftName}.`, false);
+                        } else {
+                            // User is not registered, so register them (add their shift)
+                            cellData[userId] = { 
+                                name: userName, 
+                                time: shiftTime, 
+                                timestamp: Date.now() 
+                            };
+                            showMessage(`Shift set for ${day}, ${shiftName}.`, false);
+                        }
+
+                        // Update the entire document
+                        transaction.set(docRef, { ...currentData, [cellId]: cellData }, { merge: true });
+                    });
+                });
+            } catch (e) {
+                console.error("Transaction failed: ", e);
+                showMessage("Failed to update shift. Please try again or check console for details.");
+            }
+        }
+        
+        // --- Event Handlers and Modal ---
+
+        function handleCellClick(e, day, shiftName, cellData) {
+            // If the user clicks on an existing user's div, show details
+            if (e.target.closest('div') && e.target.closest('.shift-cell') === e.currentTarget) {
+                let details = '';
+                const users = Object.entries(cellData).map(([id, info]) => {
+                    const isCurrentUser = id === userId;
+                    const status = isCurrentUser ? ' (YOU)' : '';
+                    return `• ${info.name || 'Unknown User'} (Shift: ${info.time || 'N/A'}) ${status}`;
+                }).join('\n');
+
+                if (users) {
+                    details = `Users on this shift:\n\n${users}`;
+                } else {
+                    details = 'This shift is currently open.';
+                }
+                
+                showModal(`${day} - ${shiftName} Shift`, details);
+            }
+            
+            // Toggle the shift for the current user
+            updateShift(day, shiftName);
+        }
+
+        function showModal(title, details) {
+            modalTitle.textContent = title;
+            modalDetails.textContent = details;
+            shiftModal.classList.remove('hidden');
+            shiftModal.classList.add('flex');
+        }
+
+        window.closeModal = function() {
+            shiftModal.classList.add('hidden');
+            shiftModal.classList.remove('flex');
+        }
+        
+        // --- Initialization ---
+
+        async function initFirebase() {
             try {
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
-                setDbInstance(db);
-                setAuthInstance(auth);
 
-                // Set up authentication listener
-                const unsubscribe = onAuthStateChanged(auth, async (user) => {
-                    if (user) {
-                        setUserId(user.uid);
-                    } else {
-                        // Sign in anonymously if no token or current user (needed for Firebase rules)
-                        try {
-                            const anonymousUser = await signInAnonymously(auth);
-                            setUserId(anonymousUser.user.uid);
-                        } catch (e) {
-                            console.error("Anonymous sign-in failed:", e);
-                            // Fallback to a random ID if auth completely fails
-                            setUserId(crypto.randomUUID());
-                        }
-                    }
-                    setIsAuthReady(true);
-                });
-
-                // Sign in with custom token if available
+                // Authenticate user
                 if (initialAuthToken) {
-                    signInWithCustomToken(auth, initialAuthToken).catch(e => {
-                        console.error("Custom token sign-in failed:", e);
-                    });
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
                 }
 
-                return () => unsubscribe();
-
+                // Wait for auth state to stabilize
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        authStatus.textContent = `User ID: ${userId.substring(0, 8)}...`;
+                        isAuthReady = true;
+                        
+                        // Set up real-time listener only after auth is ready
+                        setupRealtimeListener();
+                    } else {
+                        // This case should be rare in the canvas environment, but handles sign-out
+                        userId = null;
+                        authStatus.textContent = 'Signed Out';
+                        isAuthReady = true;
+                        renderTable({}); // Clear table if signed out
+                    }
+                });
+                
             } catch (error) {
-                console.error("Firebase initialization failed:", error);
+                console.error("Firebase Initialization Failed:", error);
+                authStatus.textContent = 'Auth Error';
+                showMessage('Failed to connect to the database. Check console for details.', true);
             }
         }
-    }, []);
+        
+        function setupRealtimeListener() {
+             if (!db || !isAuthReady || !userId) return;
 
-    // 2. Data Listeners (Outlets and Employees)
-    useEffect(() => {
-        if (!isAuthReady || !userId || !dbInstance) return;
+             const docRef = getShiftDocRef();
 
-        // Listener for Outlets
-        const unsubscribeOutlets = onSnapshot(collection(dbInstance, OutletPath(userId)), (snapshot) => {
-            const newOutlets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setOutlets(newOutlets);
-        }, (error) => {
-            console.error("Error fetching outlets:", error);
-        });
+             // Check if the document exists and create it if not
+             getDoc(docRef).then(docSnapshot => {
+                 if (!docSnapshot.exists()) {
+                     console.log("Creating initial shifts document.");
+                     // Create an empty document so the listener doesn't fail
+                     setDoc(docRef, {});
+                 }
+             }).catch(err => {
+                 console.error("Error checking document existence:", err);
+             });
 
-        // Listener for Employees
-        const unsubscribeEmployees = onSnapshot(collection(dbInstance, EmployeePath(userId)), (snapshot) => {
-            const newEmployees = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setEmployees(newEmployees);
-        }, (error) => {
-            console.error("Error fetching employees:", error);
-        });
-
-        return () => {
-            unsubscribeOutlets();
-            unsubscribeEmployees();
-        };
-    }, [isAuthReady, userId, dbInstance]);
-
-    // --- CRUD Operations ---
-
-    const addOutlet = async (outletData) => {
-        if (!dbInstance || !userId) return;
-        try {
-            const outletRef = doc(collection(dbInstance, OutletPath(userId)));
-            await withExponentialBackoff(() => setDoc(outletRef, { ...outletData, createdAt: new Date() }));
-        } catch (e) {
-            console.error("Error adding outlet: ", e);
+             // Set up the real-time listener
+             onSnapshot(docRef, (doc) => {
+                 if (doc.exists()) {
+                     const shiftsData = doc.data();
+                     // Data should be an object mapping cellId -> { userId: {name, time, timestamp} }
+                     renderTable(shiftsData);
+                 } else {
+                     // Document doesn't exist yet, render empty table
+                     renderTable({}); 
+                 }
+             }, (error) => {
+                 console.error("Error listening to shifts: ", error);
+                 showMessage("Real-time updates failed. Schedule may be out of date.");
+             });
         }
-    };
 
-    const deleteOutlet = async (id) => {
-        if (!dbInstance || !userId) return;
-        try {
-            await withExponentialBackoff(() => deleteDoc(doc(dbInstance, OutletPath(userId), id)));
-        } catch (e) {
-            console.error("Error deleting outlet: ", e);
-        }
-    };
 
-    const addEmployee = async (employeeData) => {
-        if (!dbInstance || !userId) return;
-        try {
-            const employeeRef = doc(collection(dbInstance, EmployeePath(userId)));
-            await withExponentialBackoff(() => setDoc(employeeRef, { ...employeeData, createdAt: new Date() }));
-        } catch (e) {
-            console.error("Error adding employee: ", e);
-        }
-    };
+        // Start the application
+        window.onload = initFirebase;
+        
+    <script type="module">
+  // Import the functions you need from the SDKs you need
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.6.0/firebase-analytics.js";
+  // TODO: Add SDKs for Firebase products that you want to use
+  // https://firebase.google.com/docs/web/setup#available-libraries
 
-    const deleteEmployee = async (id) => {
-        if (!dbInstance || !userId) return;
-        try {
-            await withExponentialBackoff(() => deleteDoc(doc(dbInstance, EmployeePath(userId), id)));
-        } catch (e) {
-            console.error("Error deleting employee: ", e);
-        }
-    };
+  // Your web app's Firebase configuration
+  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+  const firebaseConfig = {
+    apiKey: "AIzaSyCWQCkUeEYFG1piuvKHtYSHXQO-07jG7Dw",
+    authDomain: "shift-scheduler-e61f5.firebaseapp.com",
+    projectId: "shift-scheduler-e61f5",
+    storageBucket: "shift-scheduler-e61f5.firebasestorage.app",
+    messagingSenderId: "888273404874",
+    appId: "1:888273404874:web:7c6ec038e90c2a1b2a0533",
+    measurementId: "G-VV2CTVZ4YJ"
+  };
+
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
+</script>
     
-    // --- Navigation Handlers ---
-
-    // Now accepts the full outlet object
-    const goToRoster = (outlet) => {
-        setSelectedOutlet(outlet);
-        setCurrentPage('roster');
-    };
-
-    const goBackToDashboard = () => {
-        setSelectedOutlet(null);
-        setCurrentPage('dashboard');
-    };
-
-    // --- View Renderer ---
-
-    const renderContent = () => {
-
-        switch (currentPage) {
-            case 'dashboard':
-                return (
-                    <>
-                        <div className="max-w-7xl mx-auto flex flex-col md:flex-row gap-6 p-4">
-                            <StaffList
-                                employees={employees}
-                                outlets={outlets} // Pass outlets to the StaffList
-                                deleteEmployee={deleteEmployee}
-                                addEmployee={addEmployee}
-                                isAuthReady={isAuthReady}
-                                userId={userId}
-                            />
-                            <OutletList
-                                outlets={outlets}
-                                deleteOutlet={deleteOutlet}
-                                addOutlet={addOutlet}
-                                goToRoster={goToRoster} // Pass the navigation function
-                                isAuthReady={isAuthReady}
-                                userId={userId}
-                            />
-                        </div>
-                        {/* Display User ID for debugging/sharing */}
-                        <div className="max-w-7xl mx-auto text-center mt-6 p-4 text-sm text-gray-500">
-                            User ID: {userId || (isAuthReady ? 'N/A (Auth Error)' : 'Authenticating...')}
-                        </div>
-                    </>
-                );
-
-            case 'roster':
-                if (!selectedOutlet) {
-                    return (
-                        <div className="text-center p-8 bg-white rounded-xl shadow-lg max-w-xl mx-auto mt-8">
-                            <p className="text-xl text-red-500">Outlet not found.</p>
-                            <button onClick={goBackToDashboard} className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
-                                Go Back
-                            </button>
-                        </div>
-                    );
-                }
-                return (
-                    <RosterManagement
-                        outlet={selectedOutlet}
-                        employees={employees}
-                        goBack={goBackToDashboard}
-                        db={dbInstance}
-                        auth={authInstance}
-                    />
-                );
-
-            default:
-                return (
-                    <div className="text-center p-8">
-                        <p className="text-xl text-red-500">Unknown page.</p>
-                    </div>
-                );
-        }
-    };
-
-
-    return (
-        <div className="min-h-screen bg-gray-100 font-sans">
-            {/* The new persistent header component */}
-            <NavBar 
-                isAuthReady={isAuthReady} 
-                currentPage={currentPage}
-                goToDashboard={goBackToDashboard} // Use the goBackToDashboard handler for consistency
-            />
-
-            {renderContent()}
-
-        </div>
-    );
-};
-
-export default App;
+</body>
+</html>
